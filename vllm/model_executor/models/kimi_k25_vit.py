@@ -28,6 +28,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
@@ -59,7 +60,6 @@ def get_rope_shape_decorate(func):
 
 
 @get_rope_shape_decorate
-@torch.compile(dynamic=True)
 def get_rope_shape(org, interpolation_mode, shape):
     return (
         F.interpolate(
@@ -156,15 +156,20 @@ class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
     def forward(self, x: torch.Tensor, grid_thws: torch.Tensor) -> torch.Tensor:
         pos_embs = []
         for t, h, w in grid_thws.tolist():
+            x_device = x.device
+            x_dtype = x.dtype
             assert t <= self.num_frames, f"t:{t} > self.num_frames:{self.num_frames}"
             if (h, w) == self.weight.shape[:-1]:
                 pos_emb_2d = self.weight.flatten(end_dim=1)
             else:
+                weight_fp32 = self.weight.to(dtype=torch.float32)
+                weight_cpu = weight_fp32.to("cpu")
                 pos_emb_2d = get_rope_shape(
-                    self.weight,
+                    weight_cpu,
                     interpolation_mode=self.interpolation_mode,
                     shape=(h, w),
                 )
+                pos_emb_2d = pos_emb_2d.to(x_device, dtype=x_dtype)
 
             if t == 1:
                 pos_emb_3d = pos_emb_2d
@@ -304,6 +309,7 @@ class MLP2(nn.Module):
         dims: list[int],
         activation,
         bias: bool = True,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -314,6 +320,7 @@ class MLP2(nn.Module):
             dims[0],
             dims[1],
             bias=bias,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "fc0"),
             disable_tp=self.use_data_parallel,
         )
@@ -321,6 +328,7 @@ class MLP2(nn.Module):
             dims[1],
             dims[2],
             bias=bias,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "fc1"),
             disable_tp=self.use_data_parallel,
         )
@@ -341,6 +349,7 @@ class MoonViTEncoderLayer(nn.Module):
         num_heads: int,
         hidden_dim: int,
         mlp_dim: int,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
         activation=F.gelu,
@@ -362,6 +371,7 @@ class MoonViTEncoderLayer(nn.Module):
         self.mlp = MLP2(
             [hidden_dim, mlp_dim, hidden_dim],
             activation,
+            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
             use_data_parallel=self.use_data_parallel,
         )
@@ -461,6 +471,7 @@ class MoonViT3dEncoder(nn.Module):
         num_layers: int,
         block_cfg: dict,
         video_attn_type: str = "spatial_temporal",
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -476,6 +487,7 @@ class MoonViT3dEncoder(nn.Module):
             [
                 MoonViTEncoderLayer(
                     **block_cfg,
+                    quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                 )
                 for layer_idx in range(num_layers)
@@ -544,6 +556,7 @@ class MoonViT3dPretrainedModel(nn.Module):
     def __init__(
         self,
         config: KimiK25VisionConfig,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -573,6 +586,7 @@ class MoonViT3dPretrainedModel(nn.Module):
                 "attn_bias": True,
             },
             video_attn_type=config.video_attn_type,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "encoder"),
         )
 
