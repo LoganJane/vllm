@@ -60,6 +60,7 @@ def get_rope_shape_decorate(func):
 
 
 @get_rope_shape_decorate
+@torch.compile(dynamic=True)
 def get_rope_shape(org, interpolation_mode, shape):
     return (
         F.interpolate(
@@ -156,20 +157,15 @@ class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
     def forward(self, x: torch.Tensor, grid_thws: torch.Tensor) -> torch.Tensor:
         pos_embs = []
         for t, h, w in grid_thws.tolist():
-            x_device = x.device
-            x_dtype = x.dtype
             assert t <= self.num_frames, f"t:{t} > self.num_frames:{self.num_frames}"
             if (h, w) == self.weight.shape[:-1]:
                 pos_emb_2d = self.weight.flatten(end_dim=1)
             else:
-                weight_fp32 = self.weight.to(dtype=torch.float32)
-                weight_cpu = weight_fp32.to("cpu")
                 pos_emb_2d = get_rope_shape(
-                    weight_cpu,
+                    self.weight,
                     interpolation_mode=self.interpolation_mode,
                     shape=(h, w),
                 )
-                pos_emb_2d = pos_emb_2d.to(x_device, dtype=x_dtype)
 
             if t == 1:
                 pos_emb_3d = pos_emb_2d
@@ -381,6 +377,7 @@ class MoonViTEncoderLayer(nn.Module):
             total_num_heads=num_heads,
             total_num_kv_heads=num_heads,
             bias=attn_bias,
+            quant_config=quant_config,
             prefix=f"{prefix}.wqkv",
             disable_tp=self.use_data_parallel,
         )
@@ -388,6 +385,7 @@ class MoonViTEncoderLayer(nn.Module):
             hidden_dim,
             hidden_dim,
             bias=attn_bias,
+            quant_config=quant_config,
             prefix=f"{prefix}.wo",
             disable_tp=self.use_data_parallel,
         )
@@ -660,6 +658,7 @@ class KimiK25MultiModalProjector(nn.Module):
         self,
         config: KimiK25VisionConfig,
         use_data_parallel: bool = False,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -674,12 +673,14 @@ class KimiK25MultiModalProjector(nn.Module):
             self.hidden_size,
             self.hidden_size,
             bias=True,
+            quant_config=quant_config,
             prefix=f"{prefix}.linear_1",
         )
         self.linear_2 = ReplicatedLinear(
             self.hidden_size,
             config.mm_hidden_size,
             bias=True,
+            quant_config=quant_config,
             prefix=f"{prefix}.linear_2",
         )
         self.act = GELUActivation()
